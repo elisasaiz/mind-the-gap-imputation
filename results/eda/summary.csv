@@ -1,0 +1,4 @@
+signal,pct_missing,n_natural_gaps,gap_median,pct_gaps_le_12,n_windows,n_complete_windows,n_eligible_allowing_nan,users_with_0_complete,min_complete_per_user,median_complete_per_user
+hr,0.17,1081,1.0,100.0,6274,5442,6274,0,16,132.0
+resp,21.43,30206,2.0,94.83,6800,1445,6146,0,5,35.0
+stress,26.85,25328,2.0,93.93,4783,465,4169,0,1,9.0

@@ -26,7 +26,7 @@ GAP_LEN = 12      # contiguous masked observations (12.5% of the window)
 # If False, only windows with no natural missing values are kept.
 # If True, windows may contain natural NaNs outside the artificial gap,
 # as long as the gap and its two neighbours are observed.
-ALLOW_NATURAL_NAN = False
+ALLOW_NATURAL_NAN = True
 
 # Participant-level split (fractions of participants)
 SPLIT_FRACTIONS = {"train": 0.70, "val": 0.15, "test": 0.15}

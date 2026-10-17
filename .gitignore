@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Dati
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Mac e ambiente
+.DS_Store
+.venv/
+
+# Modelli e output pesanti
+*.pt
+*.safetensors

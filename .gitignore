@@ -232,3 +232,4 @@ data/processed/*
 # Modelli e output pesanti
 *.pt
 *.safetensors
+*.zip

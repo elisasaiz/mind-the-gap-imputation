@@ -28,5 +28,9 @@ GAP_LEN = 12      # contiguous masked observations (12.5% of the window)
 # as long as the gap and its two neighbours are observed.
 ALLOW_NATURAL_NAN = True
 
-# Participant-level split (fractions of participants)
-SPLIT_FRACTIONS = {"train": 0.70, "val": 0.15, "test": 0.15}
+# Participant-level k-fold cross-validation (outer loop, used for evaluation)
+N_FOLDS = 5
+# Inside each fold, this many TRAINING participants are held out as inner
+# validation set, used only for hyperparameter selection and early stopping.
+# The test participants of the fold are never used for any choice.
+INNER_VAL_PARTICIPANTS = 7

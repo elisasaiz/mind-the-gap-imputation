@@ -1,40 +1,45 @@
-"""Train the BERT imputer for one signal and save its predictions.
+"""Train the BERT imputer with participant-level k-fold cross-validation.
 
-Training:
+For every fold and every hyperparameter setting in the grid (--lrs):
+  - the model is trained on the INNER-TRAINING participants of the fold
+  - early stopping uses the INNER-VALIDATION participants of the fold
+  - predictions are saved for the inner-validation windows (used by evaluate.py to
+    select the best setting of the fold) and for the TEST windows of the fold
+The test participants of a fold are never used for training, early stopping or
+selection. Selection of the best setting per fold happens in evaluate.py, with the
+same rule used for the Kalman specification (lowest participant-level MAE on the
+inner validation participants).
+
+Training recipe (fixed, the same in every fold):
   - training windows get a NEW random 12-value gap every epoch (same placement
     rules as the fixed masks), so the model sees many gap positions
   - natural missing values are flagged in the input and never used as targets
   - loss: MSE on the artificially masked positions only, in normalised scale
-  - normalisation (--norm):
-      window  each window is standardised with the mean / std of its own
-              OBSERVED input values (the gap is excluded), and predictions are
-              transformed back. Removes level differences between participants
-              and days (instance normalisation, as in RevIN-style time-series models).
-      global  mean / std of all observed training values of that signal
-  - two learning rates: --lr for the LoRA adapters, --head-lr for the input
-    projection and regression head, which start from scratch
-  - the model first spends several epochs predicting roughly the window mean
-    before it learns to use the values next to the gap; --min-epochs and a long
-    --patience keep early stopping from ending training on that plateau
-  - stable optimisation: linear warm-up during the first epoch, cosine decay of the
-    learning rate over --epochs, and gradient clipping (--clip). Without these,
-    a high learning rate made training collapse back to predicting the window mean
-  - mixed precision (float16) on CUDA GPUs to speed up training (--no-amp to disable)
-  - early stopping on validation MAE (original scale), computed on the FIXED
-    validation masks from make_dataset.py
+  - per-window normalisation with the mean / std of the observed input values
+    (--norm window), predictions transformed back to the original scale
+  - LoRA on query / key / value of a frozen pretrained BERT; separate learning rates
+    for the LoRA adapters (--lr, the tuned hyperparameter) and for the input
+    projection and regression head (--head-lr)
+  - linear warm-up in the first epoch, cosine decay over --epochs, gradient clipping
+  - --min-epochs and --patience prevent early stopping on the initial plateau where
+    the model only predicts the window mean
+  - mixed precision (float16) on CUDA GPUs (--no-amp to disable)
 
-Outputs:
-  results/bert/<signal>/adapter.pt        trained weights (LoRA + proj + head)
-  results/bert/<signal>/history.csv       loss and validation MAE per epoch
-  results/bert/<signal>/config.json       all settings, for reproducibility
-  results/predictions/bert_<signal>_val.npz   (and _test.npz with --predict-test)
+The script can be interrupted and restarted: finished (fold, setting) runs are
+skipped, so on Colab it simply continues where it stopped.
+
+Outputs, per run, in results/cv/bert/<signal>/fold<k>/lr<lr>/:
+  predictions.npz   val_rows, val_pred, test_rows, test_pred
+  history.csv       loss and inner-validation MAE per epoch
+  run.json          settings, best epoch, inner-validation MAE
 
 Usage:
-  python -m src.train_bert --signal hr --subset 200 --epochs 2 --tiny-random   # offline smoke test
-  python -m src.train_bert --signal hr                                         # real training (GPU)
-  python -m src.train_bert --signal hr --predict-test                          # final evaluation only
+  python -m src.train_bert --signal hr --folds 0 --subset 300 --epochs 2 --tiny-random  # offline test
+  python -m src.train_bert --signal hr                     # all folds, full grid (GPU)
+  python -m src.train_bert --signal hr --folds 0,1         # only some folds
 """
 import argparse
+import copy
 import json
 import time
 
@@ -43,7 +48,8 @@ import pandas as pd
 import torch
 
 from src.bert_model import BertImputer, count_parameters
-from src.config import GAP_LEN, PROCESSED_DIR, RESULTS_DIR, SEED
+from src.config import GAP_LEN, SEED
+from src.cv import CV_DIR, load_folds, load_signal, participant_mae, rows_of
 from src.windows import eligible_starts
 
 
@@ -96,55 +102,26 @@ def predict(model, x_input, norm: Normaliser, device, batch_size=256, amp=False)
     return np.concatenate(out) * sd + mu
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--signal", required=True, choices=["hr", "resp", "stress"])
-    p.add_argument("--model-name", default="bert-base-uncased")
-    p.add_argument("--epochs", type=int, default=40)
-    p.add_argument("--min-epochs", type=int, default=10, help="no early stopping before this epoch")
-    p.add_argument("--patience", type=int, default=10)
-    p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--lr", type=float, default=2e-4, help="peak learning rate of the LoRA adapters")
-    p.add_argument("--head-lr", type=float, default=5e-4, help="peak learning rate of projection and head")
-    p.add_argument("--clip", type=float, default=1.0, help="max gradient norm")
-    p.add_argument("--lora-r", type=int, default=16)
-    p.add_argument("--lora-alpha", type=int, default=32)
-    p.add_argument("--lora-targets", default="query,key,value",
-                   help="comma-separated BERT modules that receive LoRA adapters")
-    p.add_argument("--norm", default="window", choices=["window", "global"])
-    p.add_argument("--subset", type=int, default=0, help="use only N training windows (debug)")
-    p.add_argument("--device", default="auto")
-    p.add_argument("--tiny-random", action="store_true", help="offline test without pretrained BERT")
-    p.add_argument("--predict-test", action="store_true", help="also predict the test set")
-    p.add_argument("--no-amp", action="store_true", help="disable mixed precision on GPU")
-    args = p.parse_args()
+def train_one(args, data, fold, lr, device, amp, out_dir):
+    torch.manual_seed(SEED + int(fold["id"]))
+    rng = np.random.default_rng(SEED + int(fold["id"]))
 
-    torch.manual_seed(SEED)
-    rng = np.random.default_rng(SEED)
-    device = pick_device(args.device)
-    amp = device.type == "cuda" and not args.no_amp
-    out_dir = RESULTS_DIR / "bert" / args.signal
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # ---- data ----
-    train = np.load(PROCESSED_DIR / f"{args.signal}_train.npz")
-    val = np.load(PROCESSED_DIR / f"{args.signal}_val.npz")
-    x_train = train["x_true"]
+    tr = rows_of(data, fold["inner_train"])
+    va = rows_of(data, fold["inner_val"])
+    te = rows_of(data, fold["test"])
     if args.subset:
-        x_train = x_train[rng.permutation(len(x_train))[:args.subset]]
+        tr = rng.permutation(tr)[:args.subset]
+    x_train = data["x_true"][tr]
     norm = Normaliser(args.norm, x_train)
     starts = [eligible_starts(w, GAP_LEN) for w in x_train]
 
-    # ---- model ----
     model = BertImputer(args.model_name, args.lora_r, args.lora_alpha,
                         lora_targets=args.lora_targets.split(","),
                         tiny_random=args.tiny_random).to(device)
     trainable, total = count_parameters(model)
-    print(f"device={device} (mixed precision: {amp})  train windows={len(x_train)}  val windows={len(val['x_true'])}")
-    print(f"trainable parameters: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
     lora_params = [q for n, q in model.named_parameters() if q.requires_grad and "lora_" in n]
     new_params = list(model.proj.parameters()) + list(model.head.parameters())
-    opt = torch.optim.AdamW([{"params": lora_params, "lr": args.lr},
+    opt = torch.optim.AdamW([{"params": lora_params, "lr": lr},
                              {"params": new_params, "lr": args.head_lr}])
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
     steps_per_epoch = int(np.ceil(len(x_train) / args.batch_size))
@@ -157,14 +134,16 @@ def main():
         return 0.5 * (1 + np.cos(np.pi * min(1.0, progress)))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_factor)
 
-    val_mask = val["mask"]
-    best_mae, best_epoch, history = np.inf, -1, []
+    def val_score():
+        pred = predict(model, data["x_input"][va], norm, device, amp=amp)
+        return participant_mae(data["x_true"][va], pred, data["mask"][va], data["user_id"][va])
+
+    best_mae, best_epoch, best_state, history = np.inf, -1, None, []
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        # new random gap for every training window
         x_in = x_train.copy()
         target_mask = np.zeros_like(x_train, dtype=bool)
-        for i, s in enumerate(starts):
+        for i, s in enumerate(starts):  # new random gap for every training window
             s = int(rng.choice(s))
             target_mask[i, s:s + GAP_LEN] = True
         x_in[target_mask] = np.nan
@@ -194,36 +173,79 @@ def main():
             sched.step()
             losses.append(loss.item())
 
-        val_pred = predict(model, val["x_input"], norm, device, amp=amp)
-        val_mae = float(np.abs(val_pred - val["x_true"])[val_mask].mean())
-        history.append({"epoch": epoch, "train_loss": np.mean(losses), "val_mae": val_mae,
-                        "seconds": round(time.time() - t0, 1)})
-        print(f"epoch {epoch:3d}  train_loss={np.mean(losses):.4f}  val_MAE={val_mae:.3f}  "
-              f"({time.time() - t0:.0f}s)")
-
+        val_mae = val_score()
+        history.append({"epoch": epoch, "train_loss": float(np.mean(losses)),
+                        "val_mae": val_mae, "seconds": round(time.time() - t0, 1)})
+        print(f"    epoch {epoch:3d}  train_loss={np.mean(losses):.4f}  "
+              f"inner_val_MAE={val_mae:.3f}  ({time.time() - t0:.0f}s)", flush=True)
         if val_mae < best_mae:
             best_mae, best_epoch = val_mae, epoch
-            torch.save(model.trainable_state_dict(), out_dir / "adapter.pt")
+            best_state = copy.deepcopy(model.trainable_state_dict())
         elif epoch >= args.min_epochs and epoch - best_epoch >= args.patience:
-            print(f"early stopping: no improvement for {args.patience} epochs")
+            print(f"    early stopping: no improvement for {args.patience} epochs")
             break
 
+    model.load_state_dict(best_state, strict=False)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        out_dir / "predictions.npz",
+        val_rows=va, val_pred=predict(model, data["x_input"][va], norm, device, amp=amp),
+        test_rows=te, test_pred=predict(model, data["x_input"][te], norm, device, amp=amp))
     pd.DataFrame(history).to_csv(out_dir / "history.csv", index=False)
-    with open(out_dir / "config.json", "w") as f:
-        json.dump({**vars(args), "global_mean": norm.g_mean, "global_std": norm.g_std,
-                   "best_epoch": best_epoch, "best_val_mae": best_mae,
-                   "trainable_parameters": trainable, "total_parameters": total}, f, indent=2)
+    run = {**vars(args), "fold": fold["id"], "lr": lr, "best_epoch": best_epoch,
+           "inner_val_mae": best_mae, "trainable_parameters": trainable,
+           "total_parameters": total, "n_train_windows": int(len(tr))}
+    with open(out_dir / "run.json", "w") as f:  # written last: marks the run as finished
+        json.dump(run, f, indent=2)
+    return best_mae, best_epoch
 
-    # ---- predictions with the best checkpoint ----
-    model.load_state_dict(torch.load(out_dir / "adapter.pt", map_location=device), strict=False)
-    pred_dir = RESULTS_DIR / "predictions"
-    pred_dir.mkdir(parents=True, exist_ok=True)
-    splits = ["val", "test"] if args.predict_test else ["val"]
-    for split in splits:
-        data = np.load(PROCESSED_DIR / f"{args.signal}_{split}.npz")
-        x_pred = predict(model, data["x_input"], norm, device, amp=amp)
-        np.savez_compressed(pred_dir / f"bert_{args.signal}_{split}.npz", x_pred=x_pred)
-    print(f"best epoch {best_epoch}, val MAE {best_mae:.3f}; predictions saved for {splits}")
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--signal", required=True, choices=["hr", "resp", "stress"])
+    p.add_argument("--folds", default="all", help='e.g. "0,1" (default: all folds)')
+    p.add_argument("--lrs", default="1e-4,2e-4",
+                   help="grid of LoRA learning rates, selected per fold on inner validation")
+    p.add_argument("--model-name", default="bert-base-uncased")
+    p.add_argument("--epochs", type=int, default=40)
+    p.add_argument("--min-epochs", type=int, default=10, help="no early stopping before this epoch")
+    p.add_argument("--patience", type=int, default=10)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--head-lr", type=float, default=5e-4, help="peak lr of projection and head")
+    p.add_argument("--clip", type=float, default=1.0, help="max gradient norm")
+    p.add_argument("--lora-r", type=int, default=16)
+    p.add_argument("--lora-alpha", type=int, default=32)
+    p.add_argument("--lora-targets", default="query,key,value")
+    p.add_argument("--norm", default="window", choices=["window", "global"])
+    p.add_argument("--subset", type=int, default=0, help="use only N training windows (debug)")
+    p.add_argument("--device", default="auto")
+    p.add_argument("--tiny-random", action="store_true", help="offline test without pretrained BERT")
+    p.add_argument("--no-amp", action="store_true", help="disable mixed precision on GPU")
+    p.add_argument("--out-name", default="bert", help="results subfolder (use another for tests)")
+    args = p.parse_args()
+
+    device = pick_device(args.device)
+    amp = device.type == "cuda" and not args.no_amp
+    data = load_signal(args.signal)
+    folds = load_folds()
+    fold_ids = list(folds) if args.folds == "all" else args.folds.split(",")
+    lrs = [float(x) for x in args.lrs.split(",")]
+    print(f"signal={args.signal}  device={device} (mixed precision: {amp})  "
+          f"folds={fold_ids}  lr grid={lrs}")
+
+    for k in fold_ids:
+        fold = {**folds[k], "id": k}
+        for lr in lrs:
+            out_dir = CV_DIR / args.out_name / args.signal / f"fold{k}" / f"lr{lr:g}"
+            if (out_dir / "run.json").exists():
+                print(f"fold {k}  lr={lr:g}: already done, skipping")
+                continue
+            print(f"fold {k}  lr={lr:g}: training on {len(fold['inner_train'])} participants, "
+                  f"early stopping on {len(fold['inner_val'])}", flush=True)
+            t0 = time.time()
+            mae, ep = train_one(args, data, fold, lr, device, amp, out_dir)
+            print(f"fold {k}  lr={lr:g}: best epoch {ep}, inner-val MAE {mae:.3f} "
+                  f"({(time.time() - t0) / 60:.1f} min)", flush=True)
 
 
 if __name__ == "__main__":

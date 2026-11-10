@@ -1,0 +1,31 @@
+signal,fold,method,selected,inner_val_mae
+hr,0,kalman,llevel,4.694
+hr,1,kalman,llevel,5.174
+hr,2,kalman,llevel,4.88
+hr,3,kalman,llevel,5.54
+hr,4,kalman,llevel,4.431
+hr,0,bert,lr=0.0001 (2 runs),4.58
+hr,1,bert,lr=0.0002 (2 runs),5.064
+hr,2,bert,lr=0.0001 (2 runs),4.743
+hr,3,bert,lr=0.0002 (2 runs),5.408
+hr,4,bert,lr=0.0002 (2 runs),4.312
+resp,0,kalman,llevel,1.615
+resp,1,kalman,llevel,1.621
+resp,2,kalman,llevel,1.519
+resp,3,kalman,llevel,1.542
+resp,4,kalman,llevel,1.59
+resp,0,bert,lr=0.0001 (2 runs),1.566
+resp,1,bert,lr=0.0002 (2 runs),1.572
+resp,2,bert,lr=0.0001 (2 runs),1.465
+resp,3,bert,lr=0.0001 (2 runs),1.491
+resp,4,bert,lr=0.0001 (2 runs),1.53
+stress,0,kalman,llevel,6.097
+stress,1,kalman,llevel,6.764
+stress,2,kalman,llevel,6.306
+stress,3,kalman,llevel,7.129
+stress,4,kalman,llevel,5.973
+stress,0,bert,lr=0.0002 (2 runs),5.941
+stress,1,bert,lr=0.0002 (2 runs),6.393
+stress,2,bert,lr=0.0001 (2 runs),6.006
+stress,3,bert,lr=0.0002 (2 runs),6.699
+stress,4,bert,lr=0.0002 (2 runs),5.72

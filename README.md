@@ -78,9 +78,10 @@ mind-the-gap-imputation/
 │   ├── uncertainty.py     # bootstrap confidence intervals over participants
 │   └── figures.py         # figures for the report
 ├── notebooks/
-│   └── colab_train_bert_cv.ipynb   # BERT training on a Google Colab GPU
+│   ├── colab_train_bert_cv.ipynb   # cross-validated BERT training on a Google Colab GPU
+│   └── kaggle_train_bert.ipynb     # early development runs on a fixed split (not used for the results)
 ├── data/                  # not included (see "Data availability")
-├── results/               # tables and figures
+├── results/               # tables, figures and BERT run configurations (no predictions)
 └── requirements.txt
 ```
 
@@ -89,7 +90,7 @@ mind-the-gap-imputation/
 ### 1. Setup
 
 ```bash
-git clone https://github.com/<user>/mind-the-gap-imputation.git
+git clone https://github.com/elisasaiz/mind-the-gap-imputation.git
 cd mind-the-gap-imputation
 python3 -m venv .venv
 source .venv/bin/activate
@@ -98,7 +99,7 @@ pip install -r requirements.txt
 
 ### 2. Data
 
-Place the CSI Balance Challenge training files so that they look like this:
+The data are **not included** in this repository. They come from the [CSI Balance Challenge](https://www.kaggle.com/competitions/csi-balance) on Kaggle, which has **restricted access**: to reproduce the study, request access to the competition on Kaggle, download the training files and place them so that they look like this:
 
 ```
 data/raw/csi-balance/CSV_train/CSV_train/group0/dataset_user_0_train.csv
@@ -118,7 +119,7 @@ python -m src.make_dataset   # windows, masks and folds       -> data/processed/
 python -m src.baselines      # linear + Kalman (~6 min on a laptop)
 ```
 
-**BERT** needs a GPU. Open `notebooks/colab_train_bert_cv.ipynb` in Google Colab with a T4 runtime and run one cell per signal. Runs are saved to Google Drive and are resumable: finished runs are skipped. Then copy the results to `results/cv/bert/` and continue locally:
+**BERT** needs a GPU. Open `notebooks/colab_train_bert_cv.ipynb` in Google Colab with a T4 runtime and run one cell per signal. Runs are saved to Google Drive and are resumable: finished runs are skipped. Then copy the run folders to `results/cv/bert/` and continue locally:
 
 ```bash
 python -m src.evaluate       # out-of-fold test errors        -> results/cv/
@@ -134,10 +135,13 @@ All randomness uses a fixed seed (`SEED = 42` in `src/config.py`), so windows, g
 |---|---|
 | `results/cv/summary.csv` | Mean, median and standard deviation of participant-level MAE and RMSE |
 | `results/cv/participants.csv` | One test error per participant, method and signal |
-| `results/cv/pairwise.csv` | Participants for which each method is better, mean difference, Wilcoxon *p*-value |
+| `results/cv/pairwise.csv` | Participants for which each method is better and mean paired difference (the file also contains a Wilcoxon *p*-value, which is not used in the report) |
 | `results/cv/selections.csv` | Setting selected by each method in each fold |
 | `results/cv/uncertainty.csv` | Bootstrap 95% confidence intervals |
+| `results/cv/bert/<signal>/fold<k>/lr<rate>/` | Configuration (`run.json`) and training history (`history.csv`) of each of the 30 BERT runs |
 | `results/figures/` | Figures in PNG and PDF |
+
+Prediction files (`.npz`) are written locally to `results/cv/predictions/` and `results/cv/bert/`, but are not included in the repository because they contain values from the dataset.
 
 ## Environment
 
@@ -154,11 +158,11 @@ All randomness uses a fixed seed (`SEED = 42` in `src/config.py`), so windows, g
 
 ## Data availability and ethics
 
-The dataset is **not** redistributed in this repository. It contains pseudonymised physiological recordings, which are health data under the GDPR. Participant identifiers were used only to keep participants separate across folds, and no attempt was made to identify individuals. Raw data and processed windows are excluded from version control (see `.gitignore`).
+The dataset is **not** redistributed in this repository. It contains pseudonymised physiological recordings, which are health data under the GDPR. Participant identifiers were used only to keep participants separate across folds, and no attempt was made to identify individuals. Raw data, processed windows and prediction files are excluded from version control (see `.gitignore`). Access to the data must be requested through the CSI Balance Challenge on Kaggle.
 
 ## Use of AI tools
 
-A generative AI assistant (Claude, Anthropic) was used to draft and debug code. All code was reviewed, run and tested by the authors, and the results were reproduced independently on two computers. The final report explains in detail how the assistant was used and how its output was verified.
+Generative AI assistants (Claude, ChatGPT, Gemini) were used, among other things, to draft and debug code. All code was reviewed, run and tested by the authors, and the results were reproduced independently on two computers. The final report explains in detail how the assistant was used and how its output was verified.
 
 ## Citation
 

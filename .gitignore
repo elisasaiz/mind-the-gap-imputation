@@ -235,3 +235,4 @@ data/processed/*
 *.zip
 results/predictions/
 results/cv/predictions/
+*.npz

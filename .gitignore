@@ -234,3 +234,4 @@ data/processed/*
 *.safetensors
 *.zip
 results/predictions/
+results/cv/predictions/

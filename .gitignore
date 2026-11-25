@@ -233,3 +233,4 @@ data/processed/*
 *.pt
 *.safetensors
 *.zip
+results/predictions/
